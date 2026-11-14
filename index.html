@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Вместе — совместный просмотр</title>
+<style>
+  :root {
+    --bg: #14110f; --panel: #1e1a17; --panel2: #28231f; --line: #3a332d;
+    --text: #f3ece4; --muted: #a39a8f; --accent: #f2a541; --accent-ink: #2a1c05;
+    --ok: #6fcf7f; --warn: #f2a541; --bad: #e5645a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body { background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  button, input { font: inherit; color: inherit; }
+  [hidden] { display: none !important; }
+
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid var(--line); background: var(--panel2); border-radius: 10px; padding: 9px 14px; cursor: pointer; white-space: nowrap; }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .btn.primary:hover { filter: brightness(1.08); }
+  input[type=text], input[type=url] { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; min-width: 0; outline: none; }
+  input:focus-visible, .btn:focus-visible { border-color: var(--accent); outline: none; }
+
+  /* Лобби */
+  #lobby { min-height: 100%; display: grid; place-items: center; padding: 16px; }
+  .card { width: min(420px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px; }
+  .logo { font-weight: 700; font-size: 22px; letter-spacing: -.02em; }
+  .logo i { color: var(--accent); font-style: normal; }
+  .card h1 { font-size: 26px; line-height: 1.2; margin: 18px 0 8px; letter-spacing: -.02em; }
+  .card p { color: var(--muted); margin: 0 0 20px; }
+  .card label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+  .card input { width: 100%; margin-bottom: 14px; }
+  .card .btn { width: 100%; padding: 12px; }
+
+  /* Приложение */
+  #app { height: 100%; display: grid; grid-template-rows: auto 1fr; }
+  header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  #status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  #status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
+  #status.ok::before { background: var(--ok); }
+  #status.bad::before { background: var(--bad); }
+  header .spacer { flex: 1; }
+
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 340px; min-height: 0; }
+  .stage { display: flex; flex-direction: column; gap: 12px; padding: 16px; min-width: 0; min-height: 0; }
+  #srcForm { display: flex; gap: 8px; }
+  #srcInput { flex: 1; }
+  #playerBox { position: relative; flex: 1; min-height: 200px; background: #000; border-radius: 14px; overflow: hidden; }
+  #playerBox > * { position: absolute; inset: 0; width: 100%; height: 100%; }
+  #ytWrap iframe { width: 100%; height: 100%; border: 0; display: block; }
+  #vid { background: #000; }
+  #empty { display: grid; place-content: center; text-align: center; gap: 12px; padding: 24px; color: var(--muted); background: var(--panel); }
+  #empty b { color: var(--text); font-size: 18px; }
+  #empty .btn { justify-self: center; }
+
+  aside { display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--panel); min-height: 0; }
+  .tile { position: relative; aspect-ratio: 4 / 3; background: #0c0a09; margin: 12px 12px 0; border-radius: 12px; overflow: hidden; }
+  .tile video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  #avatar { position: absolute; inset: 0; display: grid; place-content: center; justify-items: center; gap: 8px; color: var(--muted); font-size: 13px; text-align: center; padding: 12px; }
+  #avatar span { width: 64px; height: 64px; border-radius: 50%; background: var(--panel2); display: grid; place-items: center; font-size: 26px; font-weight: 600; color: var(--text); }
+  #avatar.talking span { box-shadow: 0 0 0 3px var(--ok); }
+  #localVideo { position: absolute; right: 8px; bottom: 8px; width: 34%; height: auto; aspect-ratio: 4 / 3; border-radius: 8px; border: 1px solid var(--line); transform: scaleX(-1); }
+  #vol { position: absolute; left: 8px; bottom: 8px; width: 90px; accent-color: var(--accent); }
+  .callbar { display: flex; gap: 8px; padding: 12px; border-bottom: 1px solid var(--line); }
+  .callbar .btn { flex: 1; }
+  .callbar .btn.on { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 600; }
+  .callbar svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+
+  #msgs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; min-height: 120px; }
+  .msg { max-width: 88%; background: var(--panel2); padding: 7px 11px; border-radius: 12px; overflow-wrap: anywhere; align-self: flex-start; }
+  .msg small { display: block; color: var(--muted); font-size: 11px; }
+  .msg.me { align-self: flex-end; background: #4a3413; }
+  .msg.sys { align-self: center; background: none; color: var(--muted); font-size: 12px; text-align: center; padding: 0; }
+  #chatForm { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
+  #chatInput { flex: 1; }
+
+  @media (max-width: 860px) {
+    #app { height: auto; min-height: 100%; }
+    main { grid-template-columns: 1fr; }
+    #playerBox { flex: none; aspect-ratio: 16 / 9; min-height: 0; }
+    aside { border-left: 0; border-top: 1px solid var(--line); }
+    .tile { aspect-ratio: 16 / 9; }
+    #msgs { max-height: 50vh; }
+    #srcForm { flex-wrap: wrap; }
+    #srcInput { flex-basis: 100%; }
+    #srcForm .btn { flex: 1; }
+    header .logo { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<div id="lobby">
+  <form class="card" id="lobbyForm">
+    <div class="logo">В<i>месте</i></div>
+    <h1 id="lobbyTitle">Смотрите видео вдвоём</h1>
+    <p id="lobbyText">Синхронный просмотр, чат, голос и видео. Создайте комнату и отправьте ссылку.</p>
+    <label for="nameInput">Ваше имя</label>
+    <input type="text" id="nameInput" maxlength="24" placeholder="Например, Саша" required>
+    <button class="btn primary" id="lobbyBtn">Создать комнату</button>
+  </form>
+</div>
+
+<div id="app" hidden>
+  <header>
+    <div class="logo">В<i>месте</i></div>
+    <div id="status">Подключение…</div>
+    <div class="spacer"></div>
+    <button class="btn" id="copyBtn">Скопировать ссылку-приглашение</button>
+  </header>
+  <main>
+    <section class="stage">
+      <form id="srcForm">
+        <input type="text" id="srcInput" placeholder="Ссылка на YouTube или на видеофайл (.mp4, .webm)">
+        <button class="btn primary">Открыть</button>
+        <label class="btn">Файл с компьютера<input type="file" id="fileInput" accept="video/*" hidden></label>
+      </form>
+      <div id="playerBox">
+        <div id="ytWrap" hidden><div id="yt"></div></div>
+        <video id="vid" controls playsinline hidden></video>
+        <div id="empty">
+          <b id="emptyTitle">Видео пока не выбрано</b>
+          <span id="emptyText">Вставьте ссылку выше — видео откроется у обоих.<br>Пауза, запуск и перемотка синхронизируются.</span>
+          <label class="btn primary" id="emptyFileBtn" hidden>Выбрать файл<input type="file" id="fileInput2" accept="video/*" hidden></label>
+        </div>
+      </div>
+    </section>
+    <aside>
+      <div class="tile">
+        <video id="remoteVideo" autoplay playsinline></video>
+        <div id="avatar"><span id="avatarLetter">?</span><div id="avatarText">Собеседник ещё не подключился</div></div>
+        <video id="localVideo" autoplay muted playsinline hidden></video>
+        <input type="range" id="vol" min="0" max="1" step="0.05" value="1" title="Громкость собеседника" hidden>
+      </div>
+      <div class="callbar">
+        <button class="btn" id="micBtn"><svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg><span>Микрофон</span></button>
+        <button class="btn" id="camBtn"><svg viewBox="0 0 24 24"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg><span>Камера</span></button>
+      </div>
+      <div id="msgs"></div>
+      <form id="chatForm">
+        <input type="text" id="chatInput" placeholder="Сообщение…" maxlength="2000" autocomplete="off">
+        <button class="btn primary">→</button>
+      </form>
+    </aside>
+  </main>
+</div>
+
+<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+const PREFIX = 'vmeste-room-';
+let roomId = location.hash.slice(1).replace(/[^a-z0-9]/gi, '');
+let myName = '', peerName = '';
+let peer = null, conn = null, isHost = false, retryTimer = null;
+
+/* ---------- Лобби ---------- */
+try { $('nameInput').value = localStorage.getItem('vmeste-name') || ''; } catch {}
+if (roomId) {
+  $('lobbyTitle').textContent = 'Вас пригласили смотреть вместе';
+  $('lobbyText').textContent = 'Представьтесь и заходите в комнату.';
+  $('lobbyBtn').textContent = 'Войти в комнату';
+}
+$('lobbyForm').onsubmit = e => {
+  e.preventDefault();
+  myName = $('nameInput').value.trim().slice(0, 24) || 'Гость';
+  try { localStorage.setItem('vmeste-name', myName); } catch {}
+  if (!roomId) {
+    roomId = Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+    history.replaceState(null, '', '#' + roomId);
+  }
+  $('lobby').hidden = true; $('app').hidden = false;
+  if (typeof Peer === 'undefined') return setStatus('Не загрузилась библиотека связи — проверьте интернет', 'bad');
+  start();
+};
+$('copyBtn').onclick = async () => {
+  try { await navigator.clipboard.writeText(location.href); $('copyBtn').textContent = 'Ссылка скопирована ✓'; }
+  catch { prompt('Скопируйте ссылку:', location.href); }
+  setTimeout(() => $('copyBtn').textContent = 'Скопировать ссылку-приглашение', 2000);
+};
+
+/* ---------- Соединение ---------- */
+function setStatus(text, cls = '') { $('status').textContent = text; $('status').className = cls; }
+function send(m) { if (conn && conn.open) conn.send(m); }
+
+// Кто первым занял id комнаты — тот «хост», второй подключается к нему.
+function start() {
+  setStatus('Подключение…');
+  const p = peer = new Peer(PREFIX + roomId);
+  p.on('open', () => { isHost = true; setStatus('Ждём собеседника — отправьте ему ссылку'); });
+  p.on('connection', c => {
+    if (conn && conn.open) { c.on('open', () => { c.send({ t: 'full' }); setTimeout(() => c.close(), 500); }); return; }
+    bindConn(c);
+  });
+  p.on('call', onCall);
+  p.on('disconnected', () => { if (!p.destroyed) p.reconnect(); });
+  p.on('error', e => {
+    if (e.type === 'unavailable-id') { p.destroy(); joinAsGuest(); }
+    else onPeerError(e);
+  });
+}
+function joinAsGuest() {
+  const p = peer = new Peer();
+  isHost = false;
+  p.on('open', () => bindConn(p.connect(PREFIX + roomId, { reliable: true })));
+  p.on('call', onCall);
+  p.on('disconnected', () => { if (!p.destroyed) p.reconnect(); });
+  p.on('error', e => { if (e.type === 'peer-unavailable') retry(); else onPeerError(e); });
+}
+function onPeerError(e) {
+  console.warn('peer error', e.type, e);
+  if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
+    setStatus('Нет связи с сервером, пробуем снова…', 'bad'); retry();
+  }
+}
+function retry() {
+  if (retryTimer) return;
+  if (peer) peer.destroy();
+  conn = null;
+  retryTimer = setTimeout(() => { retryTimer = null; start(); }, 2500);
+}
+function bindConn(c) {
+  c.on('open', () => {
+    conn = c;
+    setStatus('Собеседник на связи', 'ok');
+    send({ t: 'hello', name: myName });
+    if (isHost && cur.kind) send(loadMsg());
+    sendMediaState();
+    placeCall();
+  });
+  c.on('data', onData);
+  c.on('close', () => {
+    if (conn !== c) return;
+    conn = null;
+    sys((peerName || 'Собеседник') + ' отключился');
+    clearRemote();
+    if (isHost) setStatus('Ждём собеседника — отправьте ему ссылку'); else { setStatus('Переподключение…'); retry(); }
+  });
+}
+addEventListener('pagehide', () => { if (peer) peer.destroy(); });
+
+function onData(m) {
+  if (!m || typeof m !== 'object') return;
+  switch (m.t) {
+    case 'hello':
+      peerName = String(m.name || 'Гость').slice(0, 24);
+      sys(peerName + ' в комнате');
+      setStatus(peerName + ' на связи', 'ok');
+      renderRemote();
+      break;
+    case 'full': setStatus('В комнате уже двое', 'bad'); if (peer) peer.destroy(); break;
+    case 'chat': addMsg(peerName || 'Собеседник', String(m.text || '').slice(0, 2000), false); break;
+    case 'load': onRemoteLoad(m); break;
+    case 'play': case 'pause': case 'seek': applyRemote(m); break;
+    case 'sync': onSync(m); break;
+    case 'reqstate': send({ t: P.playing() ? 'play' : 'pause', time: P.time() }); break;
+    case 'media': remoteMedia = { mic: !!m.mic, cam: !!m.cam }; renderRemote(); break;
+  }
+}
+
+/* ---------- Чат ---------- */
+function addMsg(name, text, me) {
+  const d = document.createElement('div'); d.className = 'msg' + (me ? ' me' : '');
+  const s = document.createElement('small');
+  s.textContent = name + ' · ' + new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  d.append(s, text);
+  pushMsg(d);
+}
+function sys(text) { const d = document.createElement('div'); d.className = 'msg sys'; d.textContent = text; pushMsg(d); }
+function pushMsg(d) { const b = $('msgs'); b.append(d); b.scrollTop = b.scrollHeight; }
+$('chatForm').onsubmit = e => {
+  e.preventDefault();
+  const text = $('chatInput').value.trim();
+  if (!text) return;
+  $('chatInput').value = '';
+  addMsg(myName, text, true);
+  if (conn && conn.open) send({ t: 'chat', text }); else sys('Собеседник не в сети — сообщение не доставлено');
+};
+
+/* ---------- Плеер и синхронизация ---------- */
+const vid = $('vid');
+let cur = { kind: null };          // {kind:'yt',id} | {kind:'url',src} | {kind:'file',name,waiting}
+let ytPlayer = null, ytReady = false, ytApi = null, pending = null;
+let suppressUntil = 0, lastLocal = 0;
+const hold = (ms = 1200) => { suppressUntil = Math.max(suppressUntil, Date.now() + ms); };
+const suppressed = () => Date.now() < suppressUntil;
+
+const P = {
+  time() { return cur.kind === 'yt' ? (ytReady ? ytPlayer.getCurrentTime() || 0 : 0) : vid.currentTime || 0; },
+  playing() { if (cur.kind === 'yt') { const s = ytReady ? ytPlayer.getPlayerState() : -1; return s === 1 || s === 3; } return !!cur.kind && !vid.paused && !vid.ended; },
+  seek(t) { if (cur.kind === 'yt') { if (ytReady) ytPlayer.seekTo(t, true); } else if (vid.readyState) vid.currentTime = t; },
+  play() { if (cur.kind === 'yt') { if (ytReady) ytPlayer.playVideo(); } else vid.play().catch(() => {}); },
+  pause() { if (cur.kind === 'yt') { if (ytReady) ytPlayer.pauseVideo(); } else vid.pause(); },
+};
+function local(t) { // локальное действие пользователя → собеседнику
+  if (suppressed() || !cur.kind || cur.waiting) return;
+  lastLocal = Date.now();
+  send({ t, time: P.time() });
+}
+function applyRemote(m) {
+  if (!cur.kind || cur.waiting) return;
+  hold();
+  const time = Number(m.time) || 0, diff = Math.abs(P.time() - time);
+  if (m.t === 'play') { if (diff > 1) P.seek(time); P.play(); }
+  else if (m.t === 'pause') { P.pause(); if (diff > 0.3) P.seek(time); }
+  else if (diff > 0.5) P.seek(time);
+}
+// Хост раз в несколько секунд шлёт позицию, гость подтягивается, если разошлись.
+setInterval(() => { if (isHost && cur.kind && !cur.waiting && P.playing()) send({ t: 'sync', time: P.time() }); }, 4000);
+function onSync(m) {
+  if (suppressed() || Date.now() - lastLocal < 2500 || !P.playing()) return;
+  if (Math.abs(P.time() - m.time) > 2) { hold(); P.seek(m.time); }
+}
+
+vid.addEventListener('play', () => { if (cur.kind !== 'yt') local('play'); });
+vid.addEventListener('pause', () => { if (cur.kind !== 'yt' && !vid.ended) local('pause'); });
+vid.addEventListener('seeking',() => { if (cur.kind !== 'yt') local('seek'); });
+vid.addEventListener('error', () => { if (cur.kind === 'url') sys('Не удалось загрузить видео по ссылке — нужна прямая ссылка на файл (.mp4, .webm)'); });
+
+function ensureYT() {
+  return ytApi ||= new Promise(res => {
+    window.onYouTubeIframeAPIReady = res;
+    const s = document.createElement('script'); s.src = 'https://www.youtube.com/iframe_api'; document.head.append(s);
+  });
+}
+function ytLoad() {
+  const st = pending || { time: 0, playing: false }; pending = null;
+  hold(2500);
+  const arg = { videoId: cur.id, startSeconds: st.time };
+  if (st.playing) ytPlayer.loadVideoById(arg); else ytPlayer.cueVideoById(arg);
+}
+// Перемотку YouTube не сообщает событием — ловим опросом: скачок времени = перемотка.
+let ytLastT = null, ytLastAt = 0, ytLastPlaying = false;
+setInterval(() => {
+  if (cur.kind !== 'yt' || !ytReady) { ytLastT = null; return; }
+  const st = ytPlayer.getPlayerState(), t = ytPlayer.getCurrentTime() || 0, now = Date.now();
+  if (ytLastT != null && (st === 1 || st === 2 || st === 3)) {
+    const expected = ytLastT + (ytLastPlaying ? (now - ytLastAt) / 1000 : 0);
+    if (Math.abs(t - expected) > 1.2) local('seek');
+  }
+  ytLastT = t; ytLastAt = now; ytLastPlaying = st === 1;
+}, 500);
+
+function parseSource(text) {
+  text = text.trim();
+  const m = text.match(/(?:youtube\.com\/(?:watch\?(?:.*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{11})/);
+  if (m) return { kind: 'yt', id: m[1] };
+  if (/^https?:\/\//i.test(text)) return { kind: 'url', src: text };
+  return null;
+}
+function loadMsg() {
+  const m = { t: 'load', kind: cur.kind, time: P.time(), playing: P.playing() };
+  if (cur.kind === 'yt') m.id = cur.id; else if (cur.kind === 'url') m.src = cur.src; else m.name = cur.name;
+  return m;
+}
+async function loadSource(s, state = { time: 0, playing: false }) {
+  hold(2500);
+  if (cur.kind === 'yt' && s.kind !== 'yt' && ytReady) ytPlayer.stopVideo();
+  if (s.kind === 'yt' || s.waiting) { vid.pause(); vid.removeAttribute('src'); vid.load(); }
+  cur = s;
+  $('ytWrap').hidden = s.kind !== 'yt';
+  vid.hidden = s.kind === 'yt' || !!s.waiting;
+  $('empty').hidden = !s.waiting;
+  if (s.waiting) {
+    $('emptyTitle').textContent = (peerName || 'Собеседник') + ' открыл файл «' + s.name + '»';
+    $('emptyText').textContent = 'Файлы с компьютера не передаются по сети — выберите тот же файл у себя.';
+    $('emptyFileBtn').hidden = false;
+    return;
+  }
+  if (s.kind === 'yt') {
+    pending = state;
+    await ensureYT();
+    if (!ytPlayer) {
+      ytPlayer = new YT.Player('yt', {
+        width: '100%', height: '100%', playerVars: { playsinline: 1, rel: 0 },
+        events: {
+          onReady: () => { ytReady = true; if (cur.kind === 'yt') ytLoad(); },
+          onStateChange: e => { if (cur.kind !== 'yt') return; if (e.data === 1) local('play'); else if (e.data === 2) local('pause'); },
+          onError: () => sys('YouTube не даёт встроить это видео — попробуйте другое'),
+        },
+      });
+    } else if (ytReady) ytLoad();
+  } else {
+    vid.src = s.src || s.objectUrl;
+    vid.addEventListener('loadedmetadata', () => {
+      hold(2500);
+      if (state.time) vid.currentTime = state.time;
+      if (state.playing) vid.play().catch(() => {});
+    }, { once: true });
+  }
+}
+function onRemoteLoad(m) {
+  if (m.kind === 'yt' && /^[\w-]{11}$/.test(m.id)) loadSource({ kind: 'yt', id: m.id }, m);
+  else if (m.kind === 'url' && /^https?:\/\//i.test(m.src)) loadSource({ kind: 'url', src: m.src }, m);
+  else if (m.kind === 'file') {
+    const name = String(m.name || 'видео').slice(0, 200);
+    if (cur.kind === 'file' && cur.name === name && !cur.waiting) return; // уже открыт у нас
+    loadSource({ kind: 'file', name, waiting: true });
+  } else return;
+  if (m.kind !== 'file') sys((peerName || 'Собеседник') + ' открыл новое видео');
+}
+$('srcForm').onsubmit = e => {
+  e.preventDefault();
+  const s = parseSource($('srcInput').value);
+  if (!s) return sys('Не похоже на ссылку. Подойдёт YouTube или прямая ссылка на видеофайл.');
+  $('srcInput').value = '';
+  loadSource(s).then(() => send(loadMsg()));
+};
+function pickFile(e) {
+  const f = e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  const answering = cur.waiting && cur.name === f.name;
+  if (cur.objectUrl) URL.revokeObjectURL(cur.objectUrl);
+  loadSource({ kind: 'file', name: f.name, objectUrl: URL.createObjectURL(f) }).then(() => {
+    send({ t: 'load', kind: 'file', name: f.name, time: 0, playing: false });
+    if (answering) send({ t: 'reqstate' });
+  });
+}
+$('fileInput').onchange = pickFile; $('fileInput2').onchange = pickFile;
+
+/* ---------- Голос и видео ---------- */
+let localStream = null, outCall = null, inCall = null, micOn = false, camOn = false;
+let remoteMedia = { mic: false, cam: false };
+
+async function setMedia(wantMic, wantCam) {
+  if (!navigator.mediaDevices) return sys('Микрофон и камера доступны только по https или на localhost');
+  const a = localStream && localStream.getAudioTracks()[0], v = localStream && localStream.getVideoTracks()[0];
+  if (a && (wantMic || wantCam) && wantCam === !!v) a.enabled = wantMic;   // просто вкл/выкл звук
+  else {
+    if (localStream) localStream.getTracks().forEach(t => t.stop());
+    localStream = null;
+    if (wantMic || wantCam) {
+      const get = cam => navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true }, video: cam ? { width: { ideal: 640 }, height: { ideal: 480 } } : false });
+      try { localStream = await get(wantCam); }
+      catch (err) {
+        if (wantCam && wantMic) { sys('Камера недоступна'); wantCam = false; try { localStream = await get(false); } catch {} }
+        if (!localStream) { sys('Нет доступа к ' + (wantCam ? 'камере' : 'микрофону') + ' — разрешите его в браузере'); wantMic = wantCam = false; }
+      }
+      if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = wantMic);
+    }
+    placeCall();
+  }
+  micOn = wantMic; camOn = wantCam;
+  $('micBtn').classList.toggle('on', micOn); $('camBtn').classList.toggle('on', camOn);
+  $('localVideo').hidden = !camOn;
+  $('localVideo').srcObject = camOn ? localStream : null;
+  sendMediaState();
+}
+function sendMediaState() { send({ t: 'media', mic: micOn, cam: camOn }); }
+function placeCall() {
+  if (outCall) { outCall.close(); outCall = null; }
+  if (localStream && conn && conn.open) outCall = peer.call(conn.peer, localStream);
+}
+function onCall(call) {
+  if (!conn || call.peer !== conn.peer) return call.close();
+  const old = inCall; inCall = call;
+  call.answer();
+  call.on('stream', s => {
+    if (inCall !== call) return;
+    $('remoteVideo').srcObject = s; $('remoteVideo').play().catch(() => {});
+    if (old) old.close();
+    renderRemote();
+  });
+}
+function renderRemote() {
+  const on = !!conn;
+  $('avatar').hidden = on && remoteMedia.cam;
+  $('avatar').classList.toggle('talking', on && remoteMedia.mic);
+  $('avatarLetter').textContent = on && peerName ? peerName[0].toUpperCase() : '?';
+  $('avatarText').textContent = !on ? 'Собеседник ещё не подключился' : (peerName || 'Собеседник') + (remoteMedia.mic ? ' · микрофон включён' : ' · микрофон выключен');
+  $('vol').hidden = !(on && (remoteMedia.mic || remoteMedia.cam));
+  if (!remoteMedia.mic && !remoteMedia.cam) $('remoteVideo').srcObject = null;
+}
+function clearRemote() {
+  remoteMedia = { mic: false, cam: false };
+  if (inCall) { inCall.close(); inCall = null; }
+  if (outCall) { outCall.close(); outCall = null; }
+  renderRemote();
+}
+$('micBtn').onclick = () => setMedia(!micOn, camOn);
+$('camBtn').onclick = () => setMedia(micOn, !camOn);
+$('vol').oninput = e => { $('remoteVideo').volume = +e.target.value; };
+</script>
+</body>
+</html>
