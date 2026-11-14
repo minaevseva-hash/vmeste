@@ -24,6 +24,21 @@
   input[type=text], input[type=url] { background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; min-width: 0; outline: none; }
   input:focus-visible, .btn:focus-visible { border-color: var(--accent); outline: none; }
 
+  header .btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  .btn.danger { border-color: var(--bad); color: var(--bad); }
+  dialog#people { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 16px; padding: 20px; width: min(380px, calc(100vw - 32px)); }
+  dialog#people::backdrop { background: rgba(0, 0, 0, .6); }
+  #people h2 { margin: 0 0 14px; font-size: 18px; }
+  #people p { color: var(--muted); margin: 0 0 14px; }
+  #people .btn { width: 100%; margin-top: 10px; }
+  .ppName { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; font-size: 16px; }
+  #ppLetter { width: 36px; height: 36px; border-radius: 50%; background: var(--panel2); display: grid; place-items: center; font-weight: 600; }
+  .ppRow { display: flex; gap: 10px; align-items: flex-start; padding: 12px; background: var(--panel2); border-radius: 10px; cursor: pointer; }
+  .ppRow input { width: 20px; height: 20px; accent-color: var(--accent); flex: none; margin: 1px 0 0; }
+  .ppRow small { display: block; color: var(--muted); }
+  #ppBan { margin-top: 14px; color: var(--muted); font-size: 13px; }
+  #kicked { min-height: 100%; display: grid; place-items: center; padding: 16px; }
+
   /* Лобби */
   #lobby { min-height: 100%; display: grid; place-items: center; padding: 16px; }
   .card { width: min(420px, 100%); background: var(--panel); border: 1px solid var(--line); border-radius: 18px; padding: 28px; }
@@ -149,6 +164,7 @@
     <div class="logo">В<i>месте</i></div>
     <div id="status">Подключение…</div>
     <div class="spacer"></div>
+    <button class="btn" id="peopleBtn" hidden><svg viewBox="0 0 24 24"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M17 4.5a4 4 0 0 1 0 7M19 14.5a7 7 0 0 1 3 6.5"/></svg><span class="long">Участники</span></button>
     <button class="btn" id="copyBtn"><span class="long">Скопировать ссылку-приглашение</span><span class="short">Пригласить</span></button>
   </header>
   <main>
@@ -197,6 +213,19 @@
   </main>
 </div>
 
+<dialog id="people">
+  <h2>Участники</h2>
+  <p id="ppEmpty">Пока никого нет. Отправьте ссылку-приглашение.</p>
+  <div id="ppPeer" hidden>
+    <div class="ppName"><span id="ppLetter"></span><b id="ppName"></b></div>
+    <label class="ppRow"><input type="checkbox" id="ppControl"><span>Может управлять видео<small>пауза, перемотка, смена видео</small></span></label>
+    <button type="button" class="btn danger" id="ppKick">Выгнать из комнаты</button>
+  </div>
+  <div id="ppBan" hidden><span id="ppBanText"></span><button type="button" class="btn" id="ppUnban">Снова впустить</button></div>
+  <button type="button" class="btn" id="ppClose">Закрыть</button>
+</dialog>
+<div id="kicked" hidden><div class="card"><div class="logo">В<i>месте</i></div><h1>Вас удалили из комнаты</h1><p>Создатель комнаты закрыл вам доступ. Чтобы вернуться, попросите его впустить вас снова.</p></div></div>
+
 <script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
@@ -207,19 +236,30 @@ const myId = rnd(12);
 let myName = '', peerName = '', peerId = null;
 // Видео выбирает и управляет им только тот, кто создал комнату («ведущий»).
 let iCreated = false, peerHost = false;
+let grant = false;      // у создателя: выдано ли гостю управление видео
+let granted = false;    // у гостя: получил ли он управление
+let peerDev = '', banned = new Set();
+// Идентификатор устройства: по нему создатель не пускает обратно тех, кого выгнал.
+let devId = '';
+try { devId = localStorage.getItem('vmeste-dev') || ''; if (!devId) { devId = rnd(16); localStorage.setItem('vmeste-dev', devId); } } catch { devId = rnd(16); }
+const canControl = () => amHost() || granted;
 function amHost() {
   if (!peerId || iCreated !== peerHost) return iCreated;
   return myId < peerId;   // оба считают себя ведущими или никто (например, очищены данные браузера)
 }
 // У гостя плеер без кнопок и закрыт прозрачным слоем: пауза и перемотка ему недоступны.
 function updateGuard() {
-  const host = amHost();
+  const host = canControl();
   $('vid').controls = host;
   // Исключение: телефон требует первое касание по самому YouTube-плееру — на это время слой снимаем.
   $('guard').hidden = host || !cur.kind || !!cur.waiting || (needSync && cur.kind === 'yt');
 }
 function applyRole() {
-  const host = amHost();
+  const host = canControl();
+  $('peopleBtn').hidden = !amHost();
+  renderPeople();
+  // У YouTube набор кнопок задаётся при создании плеера — при смене прав пересоздаём его на том же месте.
+  if (cur.kind === 'yt' && ytPlayer && ytReady && ytForHost !== host) loadSource(cur, { time: P.time(), playing: P.playing() });
   $('srcForm').hidden = !host;
   $('guestNote').hidden = host;
   $('guestText').textContent = 'Видео управляет ' + (peerName || 'тот, кто вас пригласил') + '.';
@@ -247,6 +287,7 @@ $('lobbyForm').onsubmit = e => {
     iCreated = true;
   }
   try { iCreated = iCreated || localStorage.getItem('vmeste-host:' + roomId) === '1'; } catch {}
+  try { banned = new Set(JSON.parse(localStorage.getItem('vmeste-ban:' + roomId) || '[]')); } catch {}
   applyRole();
   history.replaceState(null, '', '?room=' + roomId);
   $('lobby').hidden = true; $('app').hidden = false;
@@ -328,7 +369,7 @@ function receive(payload) {
     onData(m);
   }).catch(e => console.warn('receive', e));
 }
-const hello = () => send({ t: 'hello', name: myName, host: iCreated });
+const hello = () => send({ t: 'hello', name: myName, host: iCreated, dev: devId });
 
 async function start() {
   setStatus('Подключение к серверу…');
@@ -354,15 +395,56 @@ addEventListener('pagehide', () => send({ t: 'bye' }));
 
 function peerGone(silent) {
   if (!peerId) return;
-  peerId = null;
+  peerId = null; granted = false;
   if (!silent) sys((peerName || 'Собеседник') + ' отключился');
   clearRemote();
   updateStatus();
   applyRole();
 }
+const peerCanControl = () => amHost() ? grant : true;
+function sendRole() { if (peerId && amHost()) send({ t: 'role', control: grant }); }
+function saveBans() { try { localStorage.setItem('vmeste-ban:' + roomId, JSON.stringify([...banned])); } catch {} }
+function kicked() {   // нас выгнали: отключаемся от всего и показываем экран
+  for (const c of clients) c.end(true);
+  clients = []; aesKey = null; peerId = null;
+  clearRemote();
+  if (localStream) localStream.getTracks().forEach(t => t.stop());
+  try { vid.pause(); if (ytReady) ytPlayer.stopVideo(); } catch {}
+  if (document.fullscreenElement) document.exitFullscreen();
+  $('app').hidden = true; $('kicked').hidden = false;
+}
+/* ---------- Панель участников (у создателя комнаты) ---------- */
+function renderPeople() {
+  $('ppEmpty').hidden = !!peerId; $('ppPeer').hidden = !peerId;
+  $('ppName').textContent = peerName || 'Гость';
+  $('ppLetter').textContent = (peerName || '?')[0].toUpperCase();
+  $('ppControl').checked = grant;
+  $('ppBan').hidden = !banned.size;
+  $('ppBanText').textContent = 'Выгнано: ' + banned.size + '. Они не могут войти по ссылке.';
+}
+$('peopleBtn').onclick = () => { renderPeople(); $('people').showModal(); };
+$('ppClose').onclick = () => $('people').close();
+$('people').onclick = e => { if (e.target === $('people')) $('people').close(); };   // тап мимо окна
+$('ppControl').onchange = e => {
+  grant = e.target.checked;
+  sendRole();
+  sys(grant ? (peerName || 'Гость') + ' теперь может управлять видео' : 'Управление видео снова только у вас');
+};
+$('ppKick').onclick = () => {
+  if (!peerId || !amHost()) return;
+  const name = peerName || 'Гость';
+  if (peerDev) { banned.add(peerDev); saveBans(); }
+  send({ t: 'kick', to: peerId });
+  peerGone(true);
+  sys(name + ' удалён из комнаты');
+  renderPeople();
+};
+$('ppUnban').onclick = () => { banned.clear(); saveBans(); renderPeople(); sys('Выгнанные снова могут войти по ссылке'); };
+
 function onData(m) {
   if (m.to && m.to !== myId) return;
   if (m.t === 'full') { if (!peerId) { roomFull = true; updateStatus(); } return; }
+  if (m.t === 'kick') { if (!amHost() && (!peerId || m.from === peerId)) kicked(); return; }
   if (peerId && m.from !== peerId) {
     if (m.t !== 'hello') return;
     // Третий участник — или собеседник перезагрузил страницу (тогда старый уже молчит).
@@ -371,9 +453,11 @@ function onData(m) {
   }
   if (!peerId) {
     if (m.t !== 'hello' && m.t !== 'welcome') return;
+    if (iCreated && m.dev && banned.has(String(m.dev))) return send({ t: 'kick', to: m.from });
     peerId = m.from; roomFull = false;
     peerName = String(m.name || 'Гость').slice(0, 24);
     peerHost = !!m.host;
+    peerDev = String(m.dev || '');
     applyRole();
     sys(peerName + ' в комнате');
     updateStatus();
@@ -383,15 +467,20 @@ function onData(m) {
   }
   lastSeen = Date.now();
   switch (m.t) {
-    case 'hello': send({ t: 'welcome', to: m.from, name: myName, host: iCreated, load: cur.kind ? loadMsg() : null }); break;
-    case 'welcome': if (m.load && !cur.kind) onRemoteLoad(m.load); break;
+    case 'hello': send({ t: 'welcome', to: m.from, name: myName, host: iCreated, dev: devId, load: cur.kind ? loadMsg() : null }); sendRole(); break;
+    case 'welcome': if (m.load && !cur.kind) onRemoteLoad(m.load); sendRole(); break;
+    case 'role': if (!amHost() && granted !== !!m.control) {
+      granted = !!m.control;
+      sys(granted ? (peerName || 'Ведущий') + ' дал вам управление видео: пауза, перемотка, смена видео' : (peerName || 'Ведущий') + ' забрал у вас управление видео');
+      applyRole();
+    } break;
     case 'bye': peerGone(); break;
     case 'chat': addMsg(peerName || 'Собеседник', String(m.text || '').slice(0, 2000), false); break;
-    // Команды плеера принимаются только от ведущего.
-    case 'load': if (!amHost()) onRemoteLoad(m); break;
-    case 'play': case 'pause': case 'seek': if (!amHost()) applyRemote(m); break;
+    // Команды плеера принимаются от создателя комнаты и от гостя, которому он дал управление.
+    case 'load': if (peerCanControl()) onRemoteLoad(m); break;
+    case 'play': case 'pause': case 'seek': if (peerCanControl()) applyRemote(m); break;
     case 'sync': if (!amHost()) onSync(m); break;
-    case 'reqstate': if (amHost()) send({ t: P.playing() ? 'play' : 'pause', time: P.time() }); break;
+    case 'reqstate': if (canControl()) send({ t: P.playing() ? 'play' : 'pause', time: P.time() }); break;
     case 'media': remoteMedia = { mic: !!m.mic, cam: !!m.cam }; renderRemote(); break;
     case 'rtc': rtcQ = rtcQ.then(() => onRtc(m)); break;
   }
@@ -442,7 +531,7 @@ let wantPlay = false;
 function local(t) { // локальное действие пользователя → собеседнику
   if (needSync && t === 'play') { needSync = false; $('tapHint').hidden = true; updateGuard(); hold(); send({ t: 'reqstate' }); return; }
   if (suppressed() || !cur.kind || cur.waiting) return;
-  if (!amHost()) {   // гость нажал паузу/перемотку — возвращаем его к позиции ведущего
+  if (!canControl()) {   // гость без прав нажал паузу/перемотку — возвращаем его к позиции ведущего
     hold(); send({ t: 'reqstate' });
     return;
   }
@@ -526,7 +615,7 @@ async function loadSource(s, state = { time: 0, playing: false }) {
   if (s.kind === 'yt') {
     pending = state;
     await ensureYT();
-    const host = amHost();
+    const host = canControl();
     if (ytPlayer && ytForHost !== host) {   // роль сменилась — пересоздаём плеер с нужным набором кнопок
       try { ytPlayer.destroy(); } catch {}
       ytPlayer = null; ytReady = false; $('ytWrap').innerHTML = '<div id="yt"></div>';
@@ -564,7 +653,7 @@ function onRemoteLoad(m) {
 }
 $('srcForm').onsubmit = e => {
   e.preventDefault();
-  if (!amHost()) return;
+  if (!canControl()) return;
   const s = parseSource($('srcInput').value);
   if (!s) return sys('Не похоже на ссылку. Подойдёт YouTube или прямая ссылка на видеофайл.');
   $('srcInput').value = '';
@@ -573,7 +662,7 @@ $('srcForm').onsubmit = e => {
 function pickFile(e) {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
-  const answering = !!cur.waiting, host = amHost();
+  const answering = !!cur.waiting, host = canControl();
   if (!host && !answering) return;
   if (cur.objectUrl) URL.revokeObjectURL(cur.objectUrl);
   loadSource({ kind: 'file', name: f.name, objectUrl: URL.createObjectURL(f) }).then(() => {
