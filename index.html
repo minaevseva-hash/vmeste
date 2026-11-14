@@ -147,13 +147,15 @@
   </main>
 </div>
 
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
 <script>
 const $ = id => document.getElementById(id);
-const PREFIX = 'vmeste-room-';
-let roomId = location.hash.slice(1).replace(/[^a-z0-9]/gi, '');
-let myName = '', peerName = '';
-let peer = null, conn = null, isHost = false, retryTimer = null;
+const rnd = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
+// Комната берётся из ?room=… (или из #… в старых ссылках)
+let roomId = (new URLSearchParams(location.search).get('room') || location.hash.slice(1)).replace(/[^a-z0-9]/gi, '');
+const myId = rnd(12);
+let myName = '', peerName = '', peerId = null;
+const inviteLink = () => location.origin + location.pathname + '?room=' + roomId;
 
 /* ---------- Лобби ---------- */
 try { $('nameInput').value = localStorage.getItem('vmeste-name') || ''; } catch {}
@@ -167,95 +169,129 @@ $('lobbyForm').onsubmit = e => {
   myName = $('nameInput').value.trim().slice(0, 24) || 'Гость';
   try { localStorage.setItem('vmeste-name', myName); } catch {}
   if (!roomId) {
-    roomId = Array.from(crypto.getRandomValues(new Uint8Array(10)), b => 'abcdefghjkmnpqrstuvwxyz23456789'[b % 31]).join('');
-    history.replaceState(null, '', '#' + roomId);
+    roomId = rnd(10);
   }
+  history.replaceState(null, '', '?room=' + roomId);
   $('lobby').hidden = true; $('app').hidden = false;
-  if (typeof Peer === 'undefined') return setStatus('Не загрузилась библиотека связи — проверьте интернет', 'bad');
+  if (typeof mqtt === 'undefined' || !crypto.subtle) return setStatus('Не загрузилась библиотека связи — проверьте интернет', 'bad');
   start();
 };
 $('copyBtn').onclick = async () => {
-  try { await navigator.clipboard.writeText(location.href); $('copyBtn').textContent = 'Ссылка скопирована ✓'; }
-  catch { prompt('Скопируйте ссылку:', location.href); }
+  try { await navigator.clipboard.writeText(inviteLink()); $('copyBtn').textContent = 'Ссылка скопирована ✓'; }
+  catch { prompt('Скопируйте ссылку:', inviteLink()); }
   setTimeout(() => $('copyBtn').textContent = 'Скопировать ссылку-приглашение', 2000);
 };
 
-/* ---------- Соединение ---------- */
+/* ---------- Связь ---------- */
+// Комната, чат и синхронизация идут через публичные серверы-посредники (MQTT поверх WebSocket),
+// поэтому работают в любых сетях. Сообщения шифруются ключом из кода комнаты — серверы их не читают.
+// Подключаемся сразу к нескольким серверам: если один недоступен, работают остальные.
+const BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt'];
+let clients = [], topic = '', aesKey = null, seq = 0, lastSeen = 0, roomFull = false;
+let sendQ = Promise.resolve(), recvQ = Promise.resolve();
+const seen = new Set();
+
 function setStatus(text, cls = '') { $('status').textContent = text; $('status').className = cls; }
-function send(m) { if (conn && conn.open) conn.send(m); }
+function updateStatus() {
+  if (!clients.some(c => c.connected)) setStatus(clients.length ? 'Подключение к серверу…' : 'Отключено', clients.length ? '' : 'bad');
+  else if (peerId) setStatus((peerName || 'Собеседник') + ' на связи', 'ok');
+  else if (roomFull) setStatus('В комнате уже двое', 'bad');
+  else setStatus('Ждём собеседника — отправьте ему ссылку');
+}
+const sha = async text => new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text)));
+async function seal(obj) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, aesKey, new TextEncoder().encode(JSON.stringify(obj))));
+  let bin = ''; for (const b of iv) bin += String.fromCharCode(b); for (const b of ct) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+async function unseal(str) {
+  const all = Uint8Array.from(atob(str), ch => ch.charCodeAt(0));
+  const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: all.subarray(0, 12) }, aesKey, all.subarray(12));
+  return JSON.parse(new TextDecoder().decode(pt));
+}
+function send(m) {
+  if (!aesKey) return;
+  m.from = myId; m.n = ++seq;
+  sendQ = sendQ.then(async () => {
+    const data = await seal(m);
+    for (const c of clients) if (c.connected) c.publish(topic, data, { qos: 1 });
+  }).catch(e => console.warn('send', e));
+}
+function receive(payload) {
+  const str = payload.toString();
+  recvQ = recvQ.then(async () => {
+    let m; try { m = await unseal(str); } catch { return; }
+    if (!m || m.from === myId) return;
+    const key = m.from + ':' + m.n;
+    if (seen.has(key)) return;            // то же сообщение пришло через другой сервер
+    if (seen.size > 5000) seen.clear();
+    seen.add(key);
+    onData(m);
+  }).catch(e => console.warn('receive', e));
+}
+const hello = () => send({ t: 'hello', name: myName });
 
-// Кто первым занял id комнаты — тот «хост», второй подключается к нему.
-function start() {
-  setStatus('Подключение…');
-  const p = peer = new Peer(PREFIX + roomId);
-  p.on('open', () => { isHost = true; setStatus('Ждём собеседника — отправьте ему ссылку'); });
-  p.on('connection', c => {
-    if (conn && conn.open) { c.on('open', () => { c.send({ t: 'full' }); setTimeout(() => c.close(), 500); }); return; }
-    bindConn(c);
-  });
-  p.on('call', onCall);
-  p.on('disconnected', () => { if (!p.destroyed) p.reconnect(); });
-  p.on('error', e => {
-    if (e.type === 'unavailable-id') { p.destroy(); joinAsGuest(); }
-    else onPeerError(e);
+async function start() {
+  setStatus('Подключение к серверу…');
+  const hex = [...await sha('vmeste-topic:' + roomId)].map(b => b.toString(16).padStart(2, '0')).join('');
+  topic = 'vmeste/' + hex.slice(0, 32);
+  aesKey = await crypto.subtle.importKey('raw', await sha('vmeste-key:' + roomId), 'AES-GCM', false, ['encrypt', 'decrypt']);
+  clients = BROKERS.map(url => {
+    const c = mqtt.connect(url, { clientId: 'vm_' + myId + '_' + rnd(4), reconnectPeriod: 3000, connectTimeout: 10000, keepalive: 30 });
+    c.on('connect', () => c.subscribe(topic, { qos: 1 }, () => { updateStatus(); hello(); }));
+    c.on('close', updateStatus);
+    c.on('error', e => console.warn('mqtt', url, e && e.message));
+    c.on('message', (_t, payload) => receive(payload));
+    return c;
   });
 }
-function joinAsGuest() {
-  const p = peer = new Peer();
-  isHost = false;
-  p.on('open', () => bindConn(p.connect(PREFIX + roomId, { reliable: true })));
-  p.on('call', onCall);
-  p.on('disconnected', () => { if (!p.destroyed) p.reconnect(); });
-  p.on('error', e => { if (e.type === 'peer-unavailable') retry(); else onPeerError(e); });
-}
-function onPeerError(e) {
-  console.warn('peer error', e.type, e);
-  if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(e.type)) {
-    setStatus('Нет связи с сервером, пробуем снова…', 'bad'); retry();
-  }
-}
-function retry() {
-  if (retryTimer) return;
-  if (peer) peer.destroy();
-  conn = null;
-  retryTimer = setTimeout(() => { retryTimer = null; start(); }, 2500);
-}
-function bindConn(c) {
-  c.on('open', () => {
-    conn = c;
-    setStatus('Собеседник на связи', 'ok');
-    send({ t: 'hello', name: myName });
-    if (isHost && cur.kind) send(loadMsg());
-    sendMediaState();
-    placeCall();
-  });
-  c.on('data', onData);
-  c.on('close', () => {
-    if (conn !== c) return;
-    conn = null;
-    sys((peerName || 'Собеседник') + ' отключился');
-    clearRemote();
-    if (isHost) setStatus('Ждём собеседника — отправьте ему ссылку'); else { setStatus('Переподключение…'); retry(); }
-  });
-}
-addEventListener('pagehide', () => { if (peer) peer.destroy(); });
+// Пинг собеседнику; пока его нет — периодически зовём.
+setInterval(() => {
+  if (!aesKey) return;
+  if (peerId) { send({ t: 'ping' }); if (Date.now() - lastSeen > 70000) peerGone(); }
+  else hello();
+}, 4000);
+addEventListener('pagehide', () => send({ t: 'bye' }));
 
+function peerGone(silent) {
+  if (!peerId) return;
+  peerId = null;
+  if (!silent) sys((peerName || 'Собеседник') + ' отключился');
+  clearRemote();
+  updateStatus();
+}
 function onData(m) {
-  if (!m || typeof m !== 'object') return;
+  if (m.to && m.to !== myId) return;
+  if (m.t === 'full') { if (!peerId) { roomFull = true; updateStatus(); } return; }
+  if (peerId && m.from !== peerId) {
+    if (m.t !== 'hello') return;
+    // Третий участник — или собеседник перезагрузил страницу (тогда старый уже молчит).
+    if (Date.now() - lastSeen < 6000) return send({ t: 'full', to: m.from });
+    peerGone(true);
+  }
+  if (!peerId) {
+    if (m.t !== 'hello' && m.t !== 'welcome') return;
+    peerId = m.from; roomFull = false;
+    peerName = String(m.name || 'Гость').slice(0, 24);
+    sys(peerName + ' в комнате');
+    updateStatus();
+    sendMediaState();
+    if (myId < peerId) startCall(); else send({ t: 'rtc', want: true });
+    renderRemote();
+  }
+  lastSeen = Date.now();
   switch (m.t) {
-    case 'hello':
-      peerName = String(m.name || 'Гость').slice(0, 24);
-      sys(peerName + ' в комнате');
-      setStatus(peerName + ' на связи', 'ok');
-      renderRemote();
-      break;
-    case 'full': setStatus('В комнате уже двое', 'bad'); if (peer) peer.destroy(); break;
+    case 'hello': send({ t: 'welcome', to: m.from, name: myName, load: cur.kind ? loadMsg() : null }); break;
+    case 'welcome': if (m.load && !cur.kind) onRemoteLoad(m.load); break;
+    case 'bye': peerGone(); break;
     case 'chat': addMsg(peerName || 'Собеседник', String(m.text || '').slice(0, 2000), false); break;
     case 'load': onRemoteLoad(m); break;
     case 'play': case 'pause': case 'seek': applyRemote(m); break;
     case 'sync': onSync(m); break;
     case 'reqstate': send({ t: P.playing() ? 'play' : 'pause', time: P.time() }); break;
     case 'media': remoteMedia = { mic: !!m.mic, cam: !!m.cam }; renderRemote(); break;
+    case 'rtc': rtcQ = rtcQ.then(() => onRtc(m)); break;
   }
 }
 
@@ -275,7 +311,7 @@ $('chatForm').onsubmit = e => {
   if (!text) return;
   $('chatInput').value = '';
   addMsg(myName, text, true);
-  if (conn && conn.open) send({ t: 'chat', text }); else sys('Собеседник не в сети — сообщение не доставлено');
+  if (peerId) send({ t: 'chat', text }); else sys('Собеседник не в сети — сообщение не доставлено');
 };
 
 /* ---------- Плеер и синхронизация ---------- */
@@ -306,8 +342,8 @@ function applyRemote(m) {
   else if (m.t === 'pause') { P.pause(); if (diff > 0.3) P.seek(time); }
   else if (diff > 0.5) P.seek(time);
 }
-// Хост раз в несколько секунд шлёт позицию, гость подтягивается, если разошлись.
-setInterval(() => { if (isHost && cur.kind && !cur.waiting && P.playing()) send({ t: 'sync', time: P.time() }); }, 4000);
+// Один из двоих раз в несколько секунд шлёт позицию, второй подтягивается, если разошлись.
+setInterval(() => { if (peerId && myId < peerId && cur.kind && !cur.waiting && P.playing()) send({ t: 'sync', time: P.time() }); }, 4000);
 function onSync(m) {
   if (suppressed() || Date.now() - lastLocal < 2500 || !P.playing()) return;
   if (Math.abs(P.time() - m.time) > 2) { hold(); P.seek(m.time); }
@@ -420,7 +456,8 @@ function pickFile(e) {
 $('fileInput').onchange = pickFile; $('fileInput2').onchange = pickFile;
 
 /* ---------- Голос и видео ---------- */
-let localStream = null, outCall = null, inCall = null, micOn = false, camOn = false;
+let localStream = null, micOn = false, camOn = false;
+let pc = null, callWarned = false;
 let remoteMedia = { mic: false, cam: false };
 
 async function setMedia(wantMic, wantCam) {
@@ -439,43 +476,92 @@ async function setMedia(wantMic, wantCam) {
       }
       if (localStream) localStream.getAudioTracks().forEach(t => t.enabled = wantMic);
     }
-    placeCall();
   }
+  attachLocal();
   micOn = wantMic; camOn = wantCam;
   $('micBtn').classList.toggle('on', micOn); $('camBtn').classList.toggle('on', camOn);
   $('localVideo').hidden = !camOn;
   $('localVideo').srcObject = camOn ? localStream : null;
   sendMediaState();
+  if (pc && pc.iceConnectionState === 'failed' && (micOn || camOn)) { callWarned = false; warnCall(); }
 }
 function sendMediaState() { send({ t: 'media', mic: micOn, cam: camOn }); }
-function placeCall() {
-  if (outCall) { outCall.close(); outCall = null; }
-  if (localStream && conn && conn.open) outCall = peer.call(conn.peer, localStream);
+// Голос и видео идут напрямую между браузерами (WebRTC); сигналы — через тот же канал, что и чат.
+// Соединение создаётся один раз при встрече, сразу с аудио- и видеоканалом в обе стороны.
+// Включение микрофона/камеры потом просто подставляет дорожку — без пересогласования.
+const ICE = [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] }];
+let rtcQ = Promise.resolve(), pcMadeAt = 0;
+function newPc() {
+  if (pc) pc.close();
+  const p = pc = new RTCPeerConnection({ iceServers: ICE });
+  pcMadeAt = Date.now();
+  p.onicecandidate = e => { if (e.candidate && pc === p) send({ t: 'rtc', cand: e.candidate }); };
+  p.oniceconnectionstatechange = () => {
+    if (pc !== p) return;
+    const st = p.iceConnectionState;
+    if (st === 'connected' || st === 'completed') callWarned = false;
+    if (st === 'failed') { warnCall(); if (myId < peerId) offer(p, true); }
+  };
+  return p;
 }
-function onCall(call) {
-  if (!conn || call.peer !== conn.peer) return call.close();
-  const old = inCall; inCall = call;
-  call.answer();
-  call.on('stream', s => {
-    if (inCall !== call) return;
-    $('remoteVideo').srcObject = s; $('remoteVideo').play().catch(() => {});
-    if (old) old.close();
-    renderRemote();
-  });
+function warnCall() {
+  if (callWarned || !(micOn || camOn || remoteMedia.mic || remoteMedia.cam)) return;
+  callWarned = true;
+  sys('Звонок не соединяется: ваши сети не пропускают прямое соединение. Чат и совместный просмотр работают; для голоса попробуйте другую сеть (например, раздать интернет с телефона).');
+}
+async function offer(p, restart) {
+  try {
+    await p.setLocalDescription(await p.createOffer({ iceRestart: !!restart }));
+    if (pc === p) send({ t: 'rtc', desc: p.localDescription, fresh: !restart });
+  } catch (e) { console.warn('offer', e); }
+}
+function startCall() { // начинает тот, у кого id меньше
+  const p = newPc();
+  p.addTransceiver('audio', { direction: 'sendrecv' });
+  p.addTransceiver('video', { direction: 'sendrecv' });
+  attachLocal(); showRemote(p);
+  offer(p, false);
+}
+function attachLocal() { // подставить в соединение текущие микрофон и камеру (или убрать их)
+  if (!pc) return;
+  for (const t of pc.getTransceivers()) {
+    const kind = t.receiver.track.kind;
+    const track = localStream ? localStream.getTracks().find(x => x.kind === kind) || null : null;
+    t.sender.replaceTrack(track).catch(e => console.warn('replaceTrack', e));
+  }
+}
+function showRemote(p) {
+  const v = $('remoteVideo');
+  v.srcObject = new MediaStream(p.getReceivers().map(r => r.track));
+  v.play().catch(() => {});
+}
+async function onRtc(m) {
+  try {
+    if (m.want) { if (myId < peerId && !(pc && Date.now() - pcMadeAt < 3000)) startCall(); return; }
+    if (m.desc && m.desc.type === 'offer') {
+      const fresh = m.fresh || !pc, p = fresh ? newPc() : pc;
+      await p.setRemoteDescription(m.desc);
+      if (fresh) { for (const t of p.getTransceivers()) t.direction = 'sendrecv'; attachLocal(); showRemote(p); }
+      await p.setLocalDescription(await p.createAnswer());
+      if (pc === p) send({ t: 'rtc', desc: p.localDescription });
+    } else if (m.desc) {
+      if (pc && pc.signalingState === 'have-local-offer') await pc.setRemoteDescription(m.desc);
+    } else if (m.cand && pc && pc.remoteDescription) await pc.addIceCandidate(m.cand);
+  } catch (e) { console.warn('rtc', e); }
 }
 function renderRemote() {
-  const on = !!conn;
+  const on = !!peerId;
   $('avatar').hidden = on && remoteMedia.cam;
   $('avatar').classList.toggle('talking', on && remoteMedia.mic);
   $('avatarLetter').textContent = on && peerName ? peerName[0].toUpperCase() : '?';
   $('avatarText').textContent = !on ? 'Собеседник ещё не подключился' : (peerName || 'Собеседник') + (remoteMedia.mic ? ' · микрофон включён' : ' · микрофон выключен');
   $('vol').hidden = !(on && (remoteMedia.mic || remoteMedia.cam));
-  if (!remoteMedia.mic && !remoteMedia.cam) $('remoteVideo').srcObject = null;
+  $('remoteVideo').style.visibility = on && remoteMedia.cam ? '' : 'hidden';
 }
 function clearRemote() {
   remoteMedia = { mic: false, cam: false };
-  if (inCall) { inCall.close(); inCall = null; }
-  if (outCall) { outCall.close(); outCall = null; }
+  if (pc) { pc.close(); pc = null; }
+  $('remoteVideo').srcObject = null;
   renderRemote();
 }
 $('micBtn').onclick = () => setMedia(!micOn, camOn);
