@@ -48,6 +48,7 @@
   .stage { display: flex; flex-direction: column; gap: 12px; padding: 16px; min-width: 0; min-height: 0; }
   #srcForm { display: flex; gap: 8px; }
   #srcInput { flex: 1; }
+  #guestNote { color: var(--muted); font-size: 13px; }
   #playerBox { position: relative; flex: 1; min-height: 200px; background: #000; border-radius: 14px; overflow: hidden; }
   #playerBox > * { position: absolute; inset: 0; width: 100%; height: 100%; }
   #ytWrap iframe { width: 100%; height: 100%; border: 0; display: block; }
@@ -152,6 +153,7 @@
         <button class="btn primary">Открыть</button>
         <label class="btn">Файл<span class="long">&nbsp;с компьютера</span><input type="file" id="fileInput" accept="video/*" hidden></label>
       </form>
+      <div id="guestNote" hidden></div>
       <div id="playerBox">
         <div id="ytWrap" hidden><div id="yt"></div></div>
         <video id="vid" controls playsinline hidden></video>
@@ -193,6 +195,21 @@ const rnd = n => Array.from(crypto.getRandomValues(new Uint8Array(n)), b => 'abc
 let roomId = (new URLSearchParams(location.search).get('room') || location.hash.slice(1)).replace(/[^a-z0-9]/gi, '');
 const myId = rnd(12);
 let myName = '', peerName = '', peerId = null;
+// Видео выбирает и управляет им только тот, кто создал комнату («ведущий»).
+let iCreated = false, peerHost = false, guestNoted = false;
+function amHost() {
+  if (!peerId || iCreated !== peerHost) return iCreated;
+  return myId < peerId;   // оба считают себя ведущими или никто (например, очищены данные браузера)
+}
+function applyRole() {
+  const host = amHost();
+  $('srcForm').hidden = !host;
+  $('guestNote').hidden = host;
+  $('guestNote').textContent = 'Видео выбирает и управляет им ' + (peerName || 'тот, кто вас пригласил') + '.';
+  if (!cur.kind) $('emptyText').innerHTML = host
+    ? 'Вставьте ссылку выше — видео откроется у обоих.<br>Паузой и перемоткой управляете вы.'
+    : 'Видео включит тот, кто вас пригласил.';
+}
 const inviteLink = () => location.origin + location.pathname + '?room=' + roomId;
 
 /* ---------- Лобби ---------- */
@@ -208,7 +225,11 @@ $('lobbyForm').onsubmit = e => {
   try { localStorage.setItem('vmeste-name', myName); } catch {}
   if (!roomId) {
     roomId = rnd(10);
+    try { localStorage.setItem('vmeste-host:' + roomId, '1'); } catch {}
+    iCreated = true;
   }
+  try { iCreated = iCreated || localStorage.getItem('vmeste-host:' + roomId) === '1'; } catch {}
+  applyRole();
   history.replaceState(null, '', '?room=' + roomId);
   $('lobby').hidden = true; $('app').hidden = false;
   if (typeof mqtt === 'undefined' || !crypto.subtle) return setStatus('Не загрузилась библиотека связи — проверьте интернет', 'bad');
@@ -289,7 +310,7 @@ function receive(payload) {
     onData(m);
   }).catch(e => console.warn('receive', e));
 }
-const hello = () => send({ t: 'hello', name: myName });
+const hello = () => send({ t: 'hello', name: myName, host: iCreated });
 
 async function start() {
   setStatus('Подключение к серверу…');
@@ -319,6 +340,7 @@ function peerGone(silent) {
   if (!silent) sys((peerName || 'Собеседник') + ' отключился');
   clearRemote();
   updateStatus();
+  applyRole();
 }
 function onData(m) {
   if (m.to && m.to !== myId) return;
@@ -333,6 +355,8 @@ function onData(m) {
     if (m.t !== 'hello' && m.t !== 'welcome') return;
     peerId = m.from; roomFull = false;
     peerName = String(m.name || 'Гость').slice(0, 24);
+    peerHost = !!m.host;
+    applyRole();
     sys(peerName + ' в комнате');
     updateStatus();
     sendMediaState();
@@ -341,14 +365,15 @@ function onData(m) {
   }
   lastSeen = Date.now();
   switch (m.t) {
-    case 'hello': send({ t: 'welcome', to: m.from, name: myName, load: cur.kind ? loadMsg() : null }); break;
+    case 'hello': send({ t: 'welcome', to: m.from, name: myName, host: iCreated, load: cur.kind ? loadMsg() : null }); break;
     case 'welcome': if (m.load && !cur.kind) onRemoteLoad(m.load); break;
     case 'bye': peerGone(); break;
     case 'chat': addMsg(peerName || 'Собеседник', String(m.text || '').slice(0, 2000), false); break;
-    case 'load': onRemoteLoad(m); break;
-    case 'play': case 'pause': case 'seek': applyRemote(m); break;
-    case 'sync': onSync(m); break;
-    case 'reqstate': send({ t: P.playing() ? 'play' : 'pause', time: P.time() }); break;
+    // Команды плеера принимаются только от ведущего.
+    case 'load': if (!amHost()) onRemoteLoad(m); break;
+    case 'play': case 'pause': case 'seek': if (!amHost()) applyRemote(m); break;
+    case 'sync': if (!amHost()) onSync(m); break;
+    case 'reqstate': if (amHost()) send({ t: P.playing() ? 'play' : 'pause', time: P.time() }); break;
     case 'media': remoteMedia = { mic: !!m.mic, cam: !!m.cam }; renderRemote(); break;
     case 'rtc': rtcQ = rtcQ.then(() => onRtc(m)); break;
   }
@@ -399,6 +424,11 @@ let wantPlay = false;
 function local(t) { // локальное действие пользователя → собеседнику
   if (needSync && t === 'play') { needSync = false; $('tapHint').hidden = true; hold(); send({ t: 'reqstate' }); return; }
   if (suppressed() || !cur.kind || cur.waiting) return;
+  if (!amHost()) {   // гость нажал паузу/перемотку — возвращаем его к позиции ведущего
+    hold(); send({ t: 'reqstate' });
+    if (!guestNoted) { guestNoted = true; sys('Паузой и перемоткой управляет ' + (peerName || 'ведущий') + ' — видео вернётся к общему месту.'); }
+    return;
+  }
   lastLocal = Date.now();
   send({ t, time: P.time() });
 }
@@ -411,8 +441,8 @@ function applyRemote(m) {
   else if (m.t === 'pause') { P.pause(); if (diff > 0.3) P.seek(time); }
   else if (diff > 0.5) P.seek(time);
 }
-// Один из двоих раз в несколько секунд шлёт позицию, второй подтягивается, если разошлись.
-setInterval(() => { if (peerId && myId < peerId && cur.kind && !cur.waiting && P.playing()) send({ t: 'sync', time: P.time() }); }, 4000);
+// Ведущий раз в несколько секунд шлёт позицию, гость подтягивается, если разошлись.
+setInterval(() => { if (peerId && amHost() && cur.kind && !cur.waiting && P.playing()) send({ t: 'sync', time: P.time() }); }, 4000);
 function onSync(m) {
   if (suppressed() || Date.now() - lastLocal < 2500 || !P.playing()) return;
   if (Math.abs(P.time() - m.time) > 2) { hold(); P.seek(m.time); }
@@ -509,6 +539,7 @@ function onRemoteLoad(m) {
 }
 $('srcForm').onsubmit = e => {
   e.preventDefault();
+  if (!amHost()) return;
   const s = parseSource($('srcInput').value);
   if (!s) return sys('Не похоже на ссылку. Подойдёт YouTube или прямая ссылка на видеофайл.');
   $('srcInput').value = '';
@@ -517,11 +548,12 @@ $('srcForm').onsubmit = e => {
 function pickFile(e) {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
-  const answering = cur.waiting && cur.name === f.name;
+  const answering = !!cur.waiting, host = amHost();
+  if (!host && !answering) return;
   if (cur.objectUrl) URL.revokeObjectURL(cur.objectUrl);
   loadSource({ kind: 'file', name: f.name, objectUrl: URL.createObjectURL(f) }).then(() => {
-    send({ t: 'load', kind: 'file', name: f.name, time: 0, playing: false });
-    if (answering) send({ t: 'reqstate' });
+    if (host) send({ t: 'load', kind: 'file', name: f.name, time: 0, playing: false });
+    else send({ t: 'reqstate' });
   });
 }
 $('fileInput').onchange = pickFile; $('fileInput2').onchange = pickFile;
