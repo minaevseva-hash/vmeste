@@ -2,7 +2,8 @@
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content">
+<meta name="theme-color" content="#14110f">
 <title>Вместе — совместный просмотр</title>
 <style>
   :root {
@@ -35,7 +36,7 @@
   .card .btn { width: 100%; padding: 12px; }
 
   /* Приложение */
-  #app { height: 100%; display: grid; grid-template-rows: auto 1fr; }
+  #app { height: 100%; display: grid; grid-template-rows: auto 1fr; grid-template-columns: minmax(0, 1fr); }
   header { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--line); }
   #status { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   #status::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
@@ -76,17 +77,51 @@
   #chatForm { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--line); }
   #chatInput { flex: 1; }
 
-  @media (max-width: 860px) {
-    #app { height: auto; min-height: 100%; }
-    main { grid-template-columns: 1fr; }
-    #playerBox { flex: none; aspect-ratio: 16 / 9; min-height: 0; }
-    aside { border-left: 0; border-top: 1px solid var(--line); }
-    .tile { aspect-ratio: 16 / 9; }
-    #msgs { max-height: 50vh; }
-    #srcForm { flex-wrap: wrap; }
-    #srcInput { flex-basis: 100%; }
-    #srcForm .btn { flex: 1; }
+  .short { display: none; }
+  #playerBox > #tapHint { inset: 10px 10px auto; width: auto; height: auto; pointer-events: none; text-align: center; background: var(--accent); color: var(--accent-ink); font-weight: 600; padding: 8px 12px; border-radius: 10px; z-index: 2; }
+
+  /* Телефон: видео сверху, под ним звонок одной строкой и чат на всю оставшуюся высоту */
+  @media (max-width: 860px), (max-height: 520px) {
+    html, body { overflow: hidden; overscroll-behavior: none; }
+    body { -webkit-text-size-adjust: 100%; }
+    #lobby { min-height: 100dvh; }
+    #app { height: var(--app-h, 100dvh); }
+    input[type=text] { font-size: 16px; }             /* иначе iOS увеличивает страницу при вводе */
+    .btn { min-height: 42px; padding: 8px 12px; }
+    .long { display: none; } .short { display: inline; }
+    header { padding: 6px 12px; padding-top: max(6px, env(safe-area-inset-top)); gap: 8px; }
     header .logo { display: none; }
+    #status { flex: 1; min-width: 0; }
+    header .spacer { display: none; }
+    main { display: flex; flex-direction: column; min-height: 0; padding: 0 env(safe-area-inset-right) 0 env(safe-area-inset-left); }
+    .stage { flex: none; padding: 8px 12px; gap: 8px; }
+    #srcForm { gap: 6px; }
+    #playerBox { flex: none; aspect-ratio: 16 / 9; min-height: 0; max-height: calc(var(--app-h, 100dvh) * .42); border-radius: 10px; }
+    aside { flex: 1; border-left: 0; border-top: 1px solid var(--line); min-height: 0; }
+    .callrow { display: flex; align-items: center; border-bottom: 1px solid var(--line); }
+    .tile { flex: none; width: 92px; margin: 8px 0 8px 12px; border-radius: 10px; cursor: pointer; }
+    .tile #avatarText, .tile #vol { display: none; }
+    #avatar span { width: 40px; height: 40px; font-size: 18px; }
+    .callbar { flex: 1; border-bottom: 0; padding: 8px 12px; }
+    .callbar .btn { min-height: 46px; }
+    .callrow.big { display: block; }
+    .callrow.big .tile { width: auto; margin: 8px 12px 0; aspect-ratio: 16 / 9; }
+    .callrow.big #avatarText, .callrow.big #vol { display: block; }
+    #msgs { min-height: 0; padding: 10px 12px; }
+    #chatForm { padding: 8px 12px; padding-bottom: max(8px, env(safe-area-inset-bottom)); }
+    /* Открыта клавиатура: оставляем видео, чат и поле ввода */
+    body.kb header, body.kb .callrow { display: none; }
+    body.kb:has(#chatInput:focus) #srcForm { display: none; }
+  }
+  /* Телефон горизонтально: видео слева на всю высоту, звонок и чат справа */
+  @media (max-height: 520px) and (orientation: landscape) {
+    main { flex-direction: row; }
+    .stage { flex: 1; min-width: 0; padding: 6px 8px; }
+    #playerBox { flex: 1; aspect-ratio: auto; max-height: none; }
+    aside { flex: none; width: min(300px, 40vw); border-top: 0; border-left: 1px solid var(--line); }
+    .tile { width: 72px; }
+    .callbar .btn span { display: none; }
+    body.kb .stage { display: none; } body.kb aside { width: auto; flex: 1; }
   }
 </style>
 </head>
@@ -108,18 +143,19 @@
     <div class="logo">В<i>месте</i></div>
     <div id="status">Подключение…</div>
     <div class="spacer"></div>
-    <button class="btn" id="copyBtn">Скопировать ссылку-приглашение</button>
+    <button class="btn" id="copyBtn"><span class="long">Скопировать ссылку-приглашение</span><span class="short">Пригласить</span></button>
   </header>
   <main>
     <section class="stage">
       <form id="srcForm">
-        <input type="text" id="srcInput" placeholder="Ссылка на YouTube или на видеофайл (.mp4, .webm)">
+        <input type="text" id="srcInput" placeholder="Ссылка на YouTube или видеофайл" enterkeyhint="go" autocapitalize="off" autocorrect="off">
         <button class="btn primary">Открыть</button>
-        <label class="btn">Файл с компьютера<input type="file" id="fileInput" accept="video/*" hidden></label>
+        <label class="btn">Файл<span class="long">&nbsp;с компьютера</span><input type="file" id="fileInput" accept="video/*" hidden></label>
       </form>
       <div id="playerBox">
         <div id="ytWrap" hidden><div id="yt"></div></div>
         <video id="vid" controls playsinline hidden></video>
+        <div id="tapHint" hidden>Нажмите ▶ на видео — подключим к общему просмотру</div>
         <div id="empty">
           <b id="emptyTitle">Видео пока не выбрано</b>
           <span id="emptyText">Вставьте ссылку выше — видео откроется у обоих.<br>Пауза, запуск и перемотка синхронизируются.</span>
@@ -128,7 +164,8 @@
       </div>
     </section>
     <aside>
-      <div class="tile">
+      <div class="callrow" id="callrow">
+      <div class="tile" id="tile">
         <video id="remoteVideo" autoplay playsinline></video>
         <div id="avatar"><span id="avatarLetter">?</span><div id="avatarText">Собеседник ещё не подключился</div></div>
         <video id="localVideo" autoplay muted playsinline hidden></video>
@@ -138,9 +175,10 @@
         <button class="btn" id="micBtn"><svg viewBox="0 0 24 24"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v3"/></svg><span>Микрофон</span></button>
         <button class="btn" id="camBtn"><svg viewBox="0 0 24 24"><path d="M23 7l-7 5 7 5V7z"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg><span>Камера</span></button>
       </div>
+      </div>
       <div id="msgs"></div>
       <form id="chatForm">
-        <input type="text" id="chatInput" placeholder="Сообщение…" maxlength="2000" autocomplete="off">
+        <input type="text" id="chatInput" placeholder="Сообщение…" maxlength="2000" autocomplete="off" enterkeyhint="send">
         <button class="btn primary">→</button>
       </form>
     </aside>
@@ -176,11 +214,32 @@ $('lobbyForm').onsubmit = e => {
   if (typeof mqtt === 'undefined' || !crypto.subtle) return setStatus('Не загрузилась библиотека связи — проверьте интернет', 'bad');
   start();
 };
+const copyLabel = $('copyBtn').innerHTML;
 $('copyBtn').onclick = async () => {
-  try { await navigator.clipboard.writeText(inviteLink()); $('copyBtn').textContent = 'Ссылка скопирована ✓'; }
+  // На телефоне открываем системное меню «Поделиться», иначе копируем ссылку.
+  if (navigator.share && matchMedia('(pointer: coarse)').matches) {
+    try { await navigator.share({ title: 'Вместе — совместный просмотр', url: inviteLink() }); return; }
+    catch (e) { if (e && e.name === 'AbortError') return; }
+  }
+  try { await navigator.clipboard.writeText(inviteLink()); $('copyBtn').textContent = 'Скопировано ✓'; }
   catch { prompt('Скопируйте ссылку:', inviteLink()); }
-  setTimeout(() => $('copyBtn').textContent = 'Скопировать ссылку-приглашение', 2000);
+  setTimeout(() => $('copyBtn').innerHTML = copyLabel, 2000);
 };
+// Высота приложения = видимая область (учитывает экранную клавиатуру и панели браузера на телефоне).
+if (window.visualViewport) {
+  let maxH = 0, lastW = 0;
+  const fit = () => {
+    const h = visualViewport.height;
+    if (visualViewport.width !== lastW) { lastW = visualViewport.width; maxH = 0; }   // повернули экран
+    maxH = Math.max(maxH, h);
+    document.documentElement.style.setProperty('--app-h', h + 'px');
+    document.body.classList.toggle('kb', h < maxH - 150);
+    scrollTo(0, 0);
+    const b = $('msgs'); b.scrollTop = b.scrollHeight;
+  };
+  visualViewport.addEventListener('resize', fit); fit();
+}
+$('tile').onclick = e => { if (e.target.id !== 'vol') $('callrow').classList.toggle('big'); };
 
 /* ---------- Связь ---------- */
 // Комната, чат и синхронизация идут через публичные серверы-посредники (MQTT поверх WebSocket),
@@ -326,10 +385,19 @@ const P = {
   time() { return cur.kind === 'yt' ? (ytReady ? ytPlayer.getCurrentTime() || 0 : 0) : vid.currentTime || 0; },
   playing() { if (cur.kind === 'yt') { const s = ytReady ? ytPlayer.getPlayerState() : -1; return s === 1 || s === 3; } return !!cur.kind && !vid.paused && !vid.ended; },
   seek(t) { if (cur.kind === 'yt') { if (ytReady) ytPlayer.seekTo(t, true); } else if (vid.readyState) vid.currentTime = t; },
-  play() { if (cur.kind === 'yt') { if (ytReady) ytPlayer.playVideo(); } else vid.play().catch(() => {}); },
+  play() { if (cur.kind === 'yt') { if (ytReady) ytPlayer.playVideo(); ytCheckPlaying(); } else vid.play().catch(needTap); },
   pause() { if (cur.kind === 'yt') { if (ytReady) ytPlayer.pauseVideo(); } else vid.pause(); },
 };
+// Телефоны не дают запустить видео со звуком без касания. Если запуск по команде собеседника
+// не удался — просим нажать ▶, а после нажатия берём у собеседника текущую позицию.
+let needSync = false;
+function needTap(e) { if (e && e.name && e.name !== 'NotAllowedError') return; needSync = true; $('tapHint').hidden = false; }
+function ytCheckPlaying() {
+  setTimeout(() => { if (cur.kind === 'yt' && ytReady && ![1, 3].includes(ytPlayer.getPlayerState()) && wantPlay) needTap(); }, 2500);
+}
+let wantPlay = false;
 function local(t) { // локальное действие пользователя → собеседнику
+  if (needSync && t === 'play') { needSync = false; $('tapHint').hidden = true; hold(); send({ t: 'reqstate' }); return; }
   if (suppressed() || !cur.kind || cur.waiting) return;
   lastLocal = Date.now();
   send({ t, time: P.time() });
@@ -338,6 +406,7 @@ function applyRemote(m) {
   if (!cur.kind || cur.waiting) return;
   hold();
   const time = Number(m.time) || 0, diff = Math.abs(P.time() - time);
+  if (m.t !== 'seek') wantPlay = m.t === 'play';
   if (m.t === 'play') { if (diff > 1) P.seek(time); P.play(); }
   else if (m.t === 'pause') { P.pause(); if (diff > 0.3) P.seek(time); }
   else if (diff > 0.5) P.seek(time);
@@ -364,7 +433,8 @@ function ytLoad() {
   const st = pending || { time: 0, playing: false }; pending = null;
   hold(2500);
   const arg = { videoId: cur.id, startSeconds: st.time };
-  if (st.playing) ytPlayer.loadVideoById(arg); else ytPlayer.cueVideoById(arg);
+  wantPlay = !!st.playing;
+  if (st.playing) { ytPlayer.loadVideoById(arg); ytCheckPlaying(); } else ytPlayer.cueVideoById(arg);
 }
 // Перемотку YouTube не сообщает событием — ловим опросом: скачок времени = перемотка.
 let ytLastT = null, ytLastAt = 0, ytLastPlaying = false;
@@ -392,6 +462,7 @@ function loadMsg() {
 }
 async function loadSource(s, state = { time: 0, playing: false }) {
   hold(2500);
+  needSync = false; $('tapHint').hidden = true;
   if (cur.kind === 'yt' && s.kind !== 'yt' && ytReady) ytPlayer.stopVideo();
   if (s.kind === 'yt' || s.waiting) { vid.pause(); vid.removeAttribute('src'); vid.load(); }
   cur = s;
@@ -422,7 +493,7 @@ async function loadSource(s, state = { time: 0, playing: false }) {
     vid.addEventListener('loadedmetadata', () => {
       hold(2500);
       if (state.time) vid.currentTime = state.time;
-      if (state.playing) vid.play().catch(() => {});
+      if (state.playing) vid.play().catch(needTap);
     }, { once: true });
   }
 }
