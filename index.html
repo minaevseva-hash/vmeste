@@ -48,7 +48,12 @@
   .stage { display: flex; flex-direction: column; gap: 12px; padding: 16px; min-width: 0; min-height: 0; }
   #srcForm { display: flex; gap: 8px; }
   #srcInput { flex: 1; }
-  #guestNote { color: var(--muted); font-size: 13px; }
+  #guestNote { color: var(--muted); font-size: 13px; display: flex; align-items: center; gap: 10px; }
+  #guestText { flex: 1; min-width: 0; }
+  #gVol { width: 110px; accent-color: var(--accent); flex: none; }
+  #gFull { padding: 4px 10px; min-height: 34px; font-size: 16px; flex: none; }
+  #playerBox > #guard { z-index: 1; cursor: default; }   /* закрывает плеер от нажатий гостя */
+  #playerBox:fullscreen { border-radius: 0; max-height: none; aspect-ratio: auto; }
   #playerBox { position: relative; flex: 1; min-height: 200px; background: #000; border-radius: 14px; overflow: hidden; }
   #playerBox > * { position: absolute; inset: 0; width: 100%; height: 100%; }
   #ytWrap iframe { width: 100%; height: 100%; border: 0; display: block; }
@@ -153,10 +158,15 @@
         <button class="btn primary">Открыть</button>
         <label class="btn">Файл<span class="long">&nbsp;с компьютера</span><input type="file" id="fileInput" accept="video/*" hidden></label>
       </form>
-      <div id="guestNote" hidden></div>
+      <div id="guestNote" hidden>
+        <span id="guestText"></span>
+        <input type="range" id="gVol" min="0" max="1" step="0.05" value="1" title="Громкость видео" aria-label="Громкость видео">
+        <button type="button" class="btn" id="gFull" title="На весь экран" aria-label="На весь экран">⛶</button>
+      </div>
       <div id="playerBox">
         <div id="ytWrap" hidden><div id="yt"></div></div>
         <video id="vid" controls playsinline hidden></video>
+        <div id="guard" hidden></div>
         <div id="tapHint" hidden>Нажмите ▶ на видео — подключим к общему просмотру</div>
         <div id="empty">
           <b id="emptyTitle">Видео пока не выбрано</b>
@@ -196,16 +206,24 @@ let roomId = (new URLSearchParams(location.search).get('room') || location.hash.
 const myId = rnd(12);
 let myName = '', peerName = '', peerId = null;
 // Видео выбирает и управляет им только тот, кто создал комнату («ведущий»).
-let iCreated = false, peerHost = false, guestNoted = false;
+let iCreated = false, peerHost = false;
 function amHost() {
   if (!peerId || iCreated !== peerHost) return iCreated;
   return myId < peerId;   // оба считают себя ведущими или никто (например, очищены данные браузера)
+}
+// У гостя плеер без кнопок и закрыт прозрачным слоем: пауза и перемотка ему недоступны.
+function updateGuard() {
+  const host = amHost();
+  $('vid').controls = host;
+  // Исключение: телефон требует первое касание по самому YouTube-плееру — на это время слой снимаем.
+  $('guard').hidden = host || !cur.kind || !!cur.waiting || (needSync && cur.kind === 'yt');
 }
 function applyRole() {
   const host = amHost();
   $('srcForm').hidden = !host;
   $('guestNote').hidden = host;
-  $('guestNote').textContent = 'Видео выбирает и управляет им ' + (peerName || 'тот, кто вас пригласил') + '.';
+  $('guestText').textContent = 'Видео управляет ' + (peerName || 'тот, кто вас пригласил') + '.';
+  updateGuard();
   if (!cur.kind) $('emptyText').innerHTML = host
     ? 'Вставьте ссылку выше — видео откроется у обоих.<br>Паузой и перемоткой управляете вы.'
     : 'Видео включит тот, кто вас пригласил.';
@@ -401,7 +419,7 @@ $('chatForm').onsubmit = e => {
 /* ---------- Плеер и синхронизация ---------- */
 const vid = $('vid');
 let cur = { kind: null };          // {kind:'yt',id} | {kind:'url',src} | {kind:'file',name,waiting}
-let ytPlayer = null, ytReady = false, ytApi = null, pending = null;
+let ytPlayer = null, ytReady = false, ytApi = null, pending = null, ytForHost = true;
 let suppressUntil = 0, lastLocal = 0;
 const hold = (ms = 1200) => { suppressUntil = Math.max(suppressUntil, Date.now() + ms); };
 const suppressed = () => Date.now() < suppressUntil;
@@ -416,17 +434,16 @@ const P = {
 // Телефоны не дают запустить видео со звуком без касания. Если запуск по команде собеседника
 // не удался — просим нажать ▶, а после нажатия берём у собеседника текущую позицию.
 let needSync = false;
-function needTap(e) { if (e && e.name && e.name !== 'NotAllowedError') return; needSync = true; $('tapHint').hidden = false; }
+function needTap(e) { if (e && e.name && e.name !== 'NotAllowedError') return; needSync = true; $('tapHint').hidden = false; updateGuard(); }
 function ytCheckPlaying() {
   setTimeout(() => { if (cur.kind === 'yt' && ytReady && ![1, 3].includes(ytPlayer.getPlayerState()) && wantPlay) needTap(); }, 2500);
 }
 let wantPlay = false;
 function local(t) { // локальное действие пользователя → собеседнику
-  if (needSync && t === 'play') { needSync = false; $('tapHint').hidden = true; hold(); send({ t: 'reqstate' }); return; }
+  if (needSync && t === 'play') { needSync = false; $('tapHint').hidden = true; updateGuard(); hold(); send({ t: 'reqstate' }); return; }
   if (suppressed() || !cur.kind || cur.waiting) return;
   if (!amHost()) {   // гость нажал паузу/перемотку — возвращаем его к позиции ведущего
     hold(); send({ t: 'reqstate' });
-    if (!guestNoted) { guestNoted = true; sys('Паузой и перемоткой управляет ' + (peerName || 'ведущий') + ' — видео вернётся к общему месту.'); }
     return;
   }
   lastLocal = Date.now();
@@ -496,6 +513,7 @@ async function loadSource(s, state = { time: 0, playing: false }) {
   if (cur.kind === 'yt' && s.kind !== 'yt' && ytReady) ytPlayer.stopVideo();
   if (s.kind === 'yt' || s.waiting) { vid.pause(); vid.removeAttribute('src'); vid.load(); }
   cur = s;
+  updateGuard();
   $('ytWrap').hidden = s.kind !== 'yt';
   vid.hidden = s.kind === 'yt' || !!s.waiting;
   $('empty').hidden = !s.waiting;
@@ -508,11 +526,18 @@ async function loadSource(s, state = { time: 0, playing: false }) {
   if (s.kind === 'yt') {
     pending = state;
     await ensureYT();
+    const host = amHost();
+    if (ytPlayer && ytForHost !== host) {   // роль сменилась — пересоздаём плеер с нужным набором кнопок
+      try { ytPlayer.destroy(); } catch {}
+      ytPlayer = null; ytReady = false; $('ytWrap').innerHTML = '<div id="yt"></div>';
+    }
     if (!ytPlayer) {
+      ytForHost = host;
       ytPlayer = new YT.Player('yt', {
-        width: '100%', height: '100%', playerVars: { playsinline: 1, rel: 0 },
+        width: '100%', height: '100%',
+        playerVars: host ? { playsinline: 1, rel: 0 } : { playsinline: 1, rel: 0, controls: 0, disablekb: 1, fs: 0 },
         events: {
-          onReady: () => { ytReady = true; if (cur.kind === 'yt') ytLoad(); },
+          onReady: () => { ytReady = true; if (!ytForHost) ytPlayer.setVolume(+$('gVol').value * 100); if (cur.kind === 'yt') ytLoad(); },
           onStateChange: e => { if (cur.kind !== 'yt') return; if (e.data === 1) local('play'); else if (e.data === 2) local('pause'); },
           onError: () => sys('YouTube не даёт встроить это видео — попробуйте другое'),
         },
@@ -556,6 +581,19 @@ function pickFile(e) {
     else send({ t: 'reqstate' });
   });
 }
+// Гость: касание по видео запускает его, только если телефон этого потребовал; громкость и полный экран — свои.
+$('guard').onclick = () => { if (needSync && cur.kind !== 'yt') vid.play().catch(() => {}); };
+$('gVol').oninput = e => {
+  const v = +e.target.value;
+  vid.volume = v; vid.muted = false;
+  if (ytReady) { ytPlayer.setVolume(v * 100); if (v > 0) ytPlayer.unMute(); }
+};
+$('gFull').onclick = () => {
+  const box = $('playerBox');
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (box.requestFullscreen) box.requestFullscreen().catch(() => {});
+  else if (cur.kind !== 'yt' && vid.webkitEnterFullscreen) vid.webkitEnterFullscreen();   // iPhone
+};
 $('fileInput').onchange = pickFile; $('fileInput2').onchange = pickFile;
 
 /* ---------- Голос и видео ---------- */
