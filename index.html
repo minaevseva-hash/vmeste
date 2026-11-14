@@ -243,9 +243,13 @@ let peerDev = '', banned = new Set();
 let devId = '';
 try { devId = localStorage.getItem('vmeste-dev') || ''; if (!devId) { devId = rnd(16); localStorage.setItem('vmeste-dev', devId); } } catch { devId = rnd(16); }
 const canControl = () => amHost() || granted;
+// Если отметки «создал комнату» нет ни у кого (другой браузер, старая ссылка) или она у обоих —
+// ведущий тот, кто дольше находится в комнате. Пока вы в комнате один, управляете вы.
+let joinedAt = Date.now(), older = true;
 function amHost() {
-  if (!peerId || iCreated !== peerHost) return iCreated;
-  return myId < peerId;   // оба считают себя ведущими или никто (например, очищены данные браузера)
+  if (!peerId) return true;
+  if (iCreated !== peerHost) return iCreated;
+  return older;
 }
 // У гостя плеер без кнопок и закрыт прозрачным слоем: пауза и перемотка ему недоступны.
 function updateGuard() {
@@ -266,7 +270,7 @@ function applyRole() {
   updateGuard();
   if (!cur.kind) $('emptyText').innerHTML = host
     ? 'Вставьте ссылку выше — видео откроется у обоих.<br>Паузой и перемоткой управляете вы.'
-    : 'Видео включит тот, кто вас пригласил.';
+    : 'Видео включит ' + (peerName || 'тот, кто вас пригласил') + '.';
 }
 const inviteLink = () => location.origin + location.pathname + '?room=' + roomId;
 
@@ -287,6 +291,7 @@ $('lobbyForm').onsubmit = e => {
     iCreated = true;
   }
   try { iCreated = iCreated || localStorage.getItem('vmeste-host:' + roomId) === '1'; } catch {}
+  try { joinedAt = +sessionStorage.getItem('vmeste-joined:' + roomId) || joinedAt; sessionStorage.setItem('vmeste-joined:' + roomId, joinedAt); } catch {}
   try { banned = new Set(JSON.parse(localStorage.getItem('vmeste-ban:' + roomId) || '[]')); } catch {}
   applyRole();
   history.replaceState(null, '', '?room=' + roomId);
@@ -369,7 +374,7 @@ function receive(payload) {
     onData(m);
   }).catch(e => console.warn('receive', e));
 }
-const hello = () => send({ t: 'hello', name: myName, host: iCreated, dev: devId });
+const hello = () => send({ t: 'hello', name: myName, host: iCreated, dev: devId, age: Date.now() - joinedAt });
 
 async function start() {
   setStatus('Подключение к серверу…');
@@ -444,7 +449,7 @@ $('ppUnban').onclick = () => { banned.clear(); saveBans(); renderPeople(); sys('
 function onData(m) {
   if (m.to && m.to !== myId) return;
   if (m.t === 'full') { if (!peerId) { roomFull = true; updateStatus(); } return; }
-  if (m.t === 'kick') { if (!amHost() && (!peerId || m.from === peerId)) kicked(); return; }
+  if (m.t === 'kick') { if (peerId ? (m.from === peerId && !amHost()) : !iCreated) kicked(); return; }
   if (peerId && m.from !== peerId) {
     if (m.t !== 'hello') return;
     // Третий участник — или собеседник перезагрузил страницу (тогда старый уже молчит).
@@ -453,11 +458,12 @@ function onData(m) {
   }
   if (!peerId) {
     if (m.t !== 'hello' && m.t !== 'welcome') return;
-    if (iCreated && m.dev && banned.has(String(m.dev))) return send({ t: 'kick', to: m.from });
+    if (m.dev && banned.has(String(m.dev))) return send({ t: 'kick', to: m.from });
     peerId = m.from; roomFull = false;
     peerName = String(m.name || 'Гость').slice(0, 24);
     peerHost = !!m.host;
     peerDev = String(m.dev || '');
+    older = Date.now() - joinedAt > (Number(m.age) || 0);
     applyRole();
     sys(peerName + ' в комнате');
     updateStatus();
@@ -467,7 +473,7 @@ function onData(m) {
   }
   lastSeen = Date.now();
   switch (m.t) {
-    case 'hello': send({ t: 'welcome', to: m.from, name: myName, host: iCreated, dev: devId, load: cur.kind ? loadMsg() : null }); sendRole(); break;
+    case 'hello': send({ t: 'welcome', to: m.from, name: myName, host: iCreated, dev: devId, age: Date.now() - joinedAt, load: cur.kind ? loadMsg() : null }); sendRole(); break;
     case 'welcome': if (m.load && !cur.kind) onRemoteLoad(m.load); sendRole(); break;
     case 'role': if (!amHost() && granted !== !!m.control) {
       granted = !!m.control;
